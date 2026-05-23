@@ -1,7 +1,5 @@
 # Games
-
 A collection of browser-based games built with vanilla HTML, CSS, and JavaScript.
-
 ## Projects
 
 ### 1. Tic Tac Toe
