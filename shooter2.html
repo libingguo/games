@@ -1,0 +1,845 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>TOP-DOWN SHOOTER</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      overflow: hidden;
+      font-family: monospace;
+    }
+    #game-wrapper {
+      position: relative;
+      display: inline-block;
+    }
+    canvas { display: block; cursor: none; image-rendering: pixelated; }
+    #menubar {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(0, 255, 136, 0.1);
+      border: 2px solid #00ff88;
+      border-radius: 8px;
+      padding: 8px 12px;
+      color: #00ff88;
+      font-size: 12px;
+      font-weight: bold;
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+    }
+    .menubar-btn {
+      background: rgba(0, 255, 136, 0.2);
+      border: 1px solid #00ff88;
+      color: #00ff88;
+      padding: 4px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-family: monospace;
+      font-weight: bold;
+      font-size: 11px;
+      transition: all 0.1s;
+    }
+    .menubar-btn:hover {
+      background: rgba(0, 255, 136, 0.4);
+      transform: scale(1.05);
+    }
+    .menubar-btn:active {
+      transform: scale(0.95);
+    }
+  </style>
+</head>
+<body>
+<div id="game-wrapper">
+  <canvas id="game"></canvas>
+  <div id="menubar">
+    <span>TOP-DOWN SHOOTER</span>
+    <button class="menubar-btn" id="pause-btn">PAUSE (P)</button>
+    <button class="menubar-btn" id="restart-btn">RESTART</button>
+  </div>
+</div>
+
+<script>
+const W = 800, H = 600;
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+canvas.width = W;
+canvas.height = H;
+
+const STATE = { MENU: 0, PLAYING: 1, LEVEL_CLEAR: 2, GAME_OVER: 3, VICTORY: 4, PAUSED: 5 };
+
+const keys = {};
+const mouse = { x: W / 2, y: H / 2, down: false };
+
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if ((e.key === 'r' || e.key === 'R') && (game.state === STATE.GAME_OVER || game.state === STATE.VICTORY)) game.start();
+  if ((e.key === 'p' || e.key === 'P')) togglePause();
+  if (e.key === 'Escape') togglePause();
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+canvas.addEventListener('mousemove', e => {
+  const r = canvas.getBoundingClientRect();
+  const scaleX = W / r.width, scaleY = H / r.height;
+  mouse.x = (e.clientX - r.left) * scaleX;
+  mouse.y = (e.clientY - r.top) * scaleY;
+});
+canvas.addEventListener('mousedown', e => {
+  mouse.down = true;
+  if (game.state === STATE.MENU) game.start();
+  else if (game.state === STATE.GAME_OVER || game.state === STATE.VICTORY) game.start();
+});
+canvas.addEventListener('mouseup', () => { mouse.down = false; });
+
+document.getElementById('pause-btn').addEventListener('click', togglePause);
+document.getElementById('restart-btn').addEventListener('click', () => { game.start(); });
+
+function togglePause() {
+  if (game.state === STATE.PLAYING) game.state = STATE.PAUSED;
+  else if (game.state === STATE.PAUSED) game.state = STATE.PLAYING;
+}
+
+function rnd(a, b) { return Math.random() * (b - a) + a; }
+function rndInt(a, b) { return Math.floor(rnd(a, b + 1)); }
+function dst(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+const COL = {
+  bg: '#080810', grid: '#0b200b',
+  player: '#00ffcc', playerBody: '#007755', playerSkin: '#ddaa77',
+  gun: '#99aaaa',
+  bullet: '#ffee00',
+  grunt: '#ff2222', flanker: '#ff8800', rusher: '#cc22ff', sniper: '#00ffff',
+  enemyBullet: '#ff4444',
+  ui: '#00ff88', uiDim: '#005533',
+  red: '#ff2244', yellow: '#ffdd00', white: '#ffffff',
+};
+
+// ── Particle ──────────────────────────────────────────────────────
+class Particle {
+  constructor(x, y, color, fast) {
+    this.x = x; this.y = y; this.color = color;
+    const spd = fast ? rnd(2, 6) : rnd(0.5, 3);
+    const a = rnd(0, Math.PI * 2);
+    this.vx = Math.cos(a) * spd; this.vy = Math.sin(a) * spd;
+    this.life = 1;
+    this.decay = rnd(0.018, fast ? 0.06 : 0.04);
+    this.size = rnd(2, fast ? 6 : 4);
+  }
+  update() {
+    this.x += this.vx; this.y += this.vy;
+    this.vx *= 0.92; this.vy *= 0.92;
+    this.life -= this.decay;
+  }
+  draw() {
+    ctx.globalAlpha = Math.max(0, this.life);
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x - this.size / 2, this.y - this.size / 2, this.size, this.size);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ── PlayerBullet ──────────────────────────────────────────────────
+class PlayerBullet {
+  constructor(x, y, angle) {
+    this.x = x; this.y = y;
+    this.vx = Math.cos(angle) * 11; this.vy = Math.sin(angle) * 11;
+    this.life = 1;
+    this.trail = [];
+  }
+  update() {
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > 6) this.trail.shift();
+    this.x += this.vx; this.y += this.vy;
+    if (this.x < -10 || this.x > W + 10 || this.y < -10 || this.y > H + 10) this.life = 0;
+  }
+  draw() {
+    for (let i = 0; i < this.trail.length; i++) {
+      ctx.globalAlpha = (i / this.trail.length) * 0.55;
+      ctx.fillStyle = COL.bullet;
+      const sz = 3 * (i / this.trail.length);
+      ctx.fillRect(this.trail[i].x - sz / 2, this.trail[i].y - sz / 2, sz, sz);
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(this.x - 4, this.y - 4, 8, 8);
+    ctx.fillStyle = COL.bullet;
+    ctx.fillRect(this.x - 3, this.y - 3, 6, 6);
+  }
+}
+
+// ── EnemyBullet ───────────────────────────────────────────────────
+class EnemyBullet {
+  constructor(x, y, angle) {
+    this.x = x; this.y = y;
+    this.vx = Math.cos(angle) * 8; this.vy = Math.sin(angle) * 8;
+    this.life = 1;
+    this.trail = [];
+  }
+  update() {
+    this.trail.push({ x: this.x, y: this.y });
+    if (this.trail.length > 4) this.trail.shift();
+    this.x += this.vx; this.y += this.vy;
+    if (this.x < -10 || this.x > W + 10 || this.y < -10 || this.y > H + 10) this.life = 0;
+  }
+  draw() {
+    for (let i = 0; i < this.trail.length; i++) {
+      ctx.globalAlpha = (i / this.trail.length) * 0.5;
+      ctx.fillStyle = COL.enemyBullet;
+      const sz = 2 * (i / this.trail.length);
+      ctx.fillRect(this.trail[i].x - sz / 2, this.trail[i].y - sz / 2, sz, sz);
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = COL.enemyBullet;
+    ctx.fillRect(this.x - 3, this.y - 3, 6, 6);
+    ctx.globalAlpha = 1;
+  }
+}
+
+// ── Enemy ─────────────────────────────────────────────────────────
+class Enemy {
+  constructor(type, x, y, level) {
+    this.type = type; this.x = x; this.y = y;
+    this.angle = 0; this.phase = rnd(0, Math.PI * 2);
+    this.life = 1;
+    const m = 1 + (level - 1) * 0.2;
+
+    if (type === 'grunt') {
+      this.hp = this.maxHp = 2; this.speed = 1.3 * m; this.color = COL.grunt;
+      this.size = 16; this.score = 10;
+      this.shootRate = 120; this.shootCd = 60; this.shootRange = 600;
+    } else if (type === 'flanker') {
+      this.hp = this.maxHp = 3; this.speed = 1.7 * m; this.color = COL.flanker;
+      this.size = 14; this.score = 20;
+      this.shootRate = 80; this.shootCd = 40; this.shootRange = 350;
+    } else if (type === 'rusher') {
+      this.hp = this.maxHp = 1; this.speed = 3.0 * m; this.color = COL.rusher;
+      this.size = 11; this.score = 30;
+      this.shootRate = 999; this.shootCd = 999; this.shootRange = 0;
+    } else if (type === 'sniper') {
+      this.hp = this.maxHp = 2; this.speed = 0.8 * m; this.color = COL.sniper;
+      this.size = 13; this.score = 40;
+      this.shootRate = 200; this.shootCd = 100; this.shootRange = 700;
+      this.telegraphT = 0;
+    }
+  }
+
+  update(player) {
+    const dx = player.x - this.x, dy = player.y - this.y;
+    const base = Math.atan2(dy, dx);
+    this.angle = base;
+    this.phase += this.type === 'rusher' ? 0.2 : 0.03;
+
+    let mx = 0, my = 0;
+    if (this.type === 'grunt') {
+      mx = Math.cos(base); my = Math.sin(base);
+    } else if (this.type === 'flanker') {
+      const off = Math.sin(this.phase) * 0.7;
+      mx = Math.cos(base + off); my = Math.sin(base + off);
+    } else if (this.type === 'rusher') {
+      const perp = base + Math.PI / 2;
+      const zz = Math.sin(this.phase) * 2.2;
+      mx = Math.cos(base) + Math.cos(perp) * zz * 0.4;
+      my = Math.sin(base) + Math.sin(perp) * zz * 0.4;
+    } else if (this.type === 'sniper') {
+      mx = Math.cos(base) * 0.5; my = Math.sin(base) * 0.5;
+    }
+
+    this.x = clamp(this.x + mx * this.speed, -30, W + 30);
+    this.y = clamp(this.y + my * this.speed, -30, H + 30);
+
+    if (this.shootCd > 0) this.shootCd--;
+    if (this.telegraphT > 0) this.telegraphT--;
+
+    const dist = dst(this, player);
+    if (this.shootCd === 0 && dist < this.shootRange && dist > 50) {
+      if (this.type === 'grunt') {
+        game.enemyBullets.push(new EnemyBullet(this.x, this.y, this.angle));
+      } else if (this.type === 'flanker') {
+        const spread = Math.PI / 12;
+        for (let i = -1; i <= 1; i++) {
+          game.enemyBullets.push(new EnemyBullet(this.x, this.y, this.angle + i * spread));
+        }
+      } else if (this.type === 'sniper') {
+        this.telegraphT = 30;
+      }
+      this.shootCd = this.shootRate;
+    }
+
+    if (this.type === 'sniper' && this.telegraphT === 1) {
+      game.enemyBullets.push(new EnemyBullet(this.x, this.y, this.angle));
+    }
+  }
+
+  draw() {
+    const s = this.size;
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle + Math.PI / 2);
+
+    const bobScale = 1 + Math.sin(game.frame * 0.08) * 0.03;
+    ctx.scale(bobScale, bobScale);
+
+    // Glow
+    ctx.shadowColor = this.color;
+    ctx.shadowBlur = 10;
+    ctx.fillStyle = this.color;
+    ctx.fillRect(-s / 2, -s / 2, s, s);
+    ctx.shadowBlur = 0;
+
+    // Inner dark
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(-s / 2 + 3, -s / 2 + 3, s - 6, s - 6);
+
+    // Eye
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(-3, -s / 2 + 2, 6, 3);
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-1, -s / 2 + 3, 2, 2);
+
+    // Gun barrel
+    ctx.fillStyle = '#889999';
+    ctx.fillRect(-2, -s / 2 - 8, 4, 8);
+
+    ctx.restore();
+
+    // HP bar
+    const bw = s * 2.2, bh = 4;
+    const bx = this.x - bw / 2, by = this.y - s - 10;
+    ctx.fillStyle = '#200020';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = this.color;
+    ctx.fillRect(bx, by, bw * (this.hp / this.maxHp), bh);
+    ctx.strokeStyle = '#000';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    // Telegraph line for sniper
+    if (this.type === 'sniper' && this.telegraphT > 0) {
+      ctx.strokeStyle = `rgba(255, 68, 68, ${this.telegraphT / 30})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(this.x, this.y);
+      const range = this.shootRange;
+      ctx.lineTo(this.x + Math.cos(this.angle) * range, this.y + Math.sin(this.angle) * range);
+      ctx.stroke();
+    }
+  }
+}
+
+// ── Player ────────────────────────────────────────────────────────
+class Player {
+  constructor() {
+    this.x = W / 2; this.y = H / 2;
+    this.speed = 3.2; this.angle = 0;
+    this.hp = 3; this.maxHp = 3;
+    this.shootCd = 0; this.shootRate = 9;
+    this.iframes = 0; this.flashT = 0;
+    this.moving = false;
+  }
+
+  update() {
+    let dx = 0, dy = 0;
+    if (keys['ArrowLeft']  || keys['a'] || keys['A']) dx -= 1;
+    if (keys['ArrowRight'] || keys['d'] || keys['D']) dx += 1;
+    if (keys['ArrowUp']    || keys['w'] || keys['W']) dy -= 1;
+    if (keys['ArrowDown']  || keys['s'] || keys['S']) dy += 1;
+
+    this.moving = dx !== 0 || dy !== 0;
+
+    if (dx && dy) { dx *= 0.7071; dy *= 0.7071; }
+    this.x = clamp(this.x + dx * this.speed, 18, W - 18);
+    this.y = clamp(this.y + dy * this.speed, 18, H - 18);
+    this.angle = Math.atan2(mouse.y - this.y, mouse.x - this.x);
+
+    if (this.shootCd > 0) this.shootCd--;
+    if (mouse.down && this.shootCd === 0) {
+      const tip = 22;
+      game.playerBullets.push(new PlayerBullet(
+        this.x + Math.cos(this.angle) * tip,
+        this.y + Math.sin(this.angle) * tip,
+        this.angle
+      ));
+      this.shootCd = this.shootRate;
+      for (let i = 0; i < 6; i++) game.particles.push(new Particle(
+        this.x + Math.cos(this.angle) * tip,
+        this.y + Math.sin(this.angle) * tip,
+        '#ffff99', true
+      ));
+    }
+    if (this.iframes > 0) this.iframes--;
+    if (this.flashT > 0) this.flashT--;
+  }
+
+  hit() {
+    if (this.iframes > 0) return;
+    this.hp--;
+    this.iframes = 80; this.flashT = 18;
+    for (let i = 0; i < 14; i++) game.particles.push(new Particle(this.x, this.y, COL.red, true));
+  }
+
+  draw() {
+    if (this.iframes > 0 && Math.floor(this.iframes / 5) % 2 === 0) return;
+
+    ctx.save();
+    ctx.translate(this.x, this.y);
+    ctx.rotate(this.angle + Math.PI / 2);
+
+    // Shadow
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath(); ctx.ellipse(2, 4, 11, 8, 0, 0, Math.PI * 2); ctx.fill();
+
+    // Walk animation
+    const legBob = this.moving ? Math.sin(game.frame * 0.25) * 2 : 0;
+
+    // Boots
+    ctx.fillStyle = '#223344';
+    ctx.fillRect(-8, 7 + legBob, 6, 6);
+    ctx.fillRect(2, 7 - legBob, 6, 6);
+
+    // Legs
+    ctx.fillStyle = '#334455';
+    ctx.fillRect(-6, 3 + legBob * 0.5, 5, 6);
+    ctx.fillRect(1, 3 - legBob * 0.5, 5, 6);
+
+    // Belt
+    ctx.fillStyle = '#554433';
+    ctx.fillRect(-7, 1, 14, 3);
+
+    // Body / vest
+    ctx.fillStyle = COL.playerBody;
+    ctx.fillRect(-7, -8, 14, 11);
+
+    // Chest detail
+    ctx.fillStyle = '#005544';
+    ctx.fillRect(-4, -6, 8, 5);
+    ctx.fillStyle = '#00aa88';
+    ctx.fillRect(-2, -5, 4, 3);
+
+    // Neck
+    ctx.fillStyle = COL.playerSkin;
+    ctx.fillRect(-2, -10, 4, 4);
+
+    // Head
+    ctx.fillStyle = COL.playerSkin;
+    ctx.fillRect(-5, -19, 10, 11);
+
+    // Helmet
+    ctx.fillStyle = COL.playerBody;
+    ctx.fillRect(-6, -21, 12, 7);
+    ctx.fillRect(-4, -23, 8, 4);
+
+    // Helmet detail
+    ctx.fillStyle = '#00aa88';
+    ctx.fillRect(-5, -20, 10, 2);
+
+    // Eyes
+    ctx.fillStyle = '#111';
+    ctx.fillRect(-4, -16, 3, 3);
+    ctx.fillRect(1, -16, 3, 3);
+    ctx.fillStyle = '#00ffcc';
+    ctx.fillRect(-3, -15, 1, 1);
+    ctx.fillRect(2, -15, 1, 1);
+
+    // Left arm
+    ctx.fillStyle = COL.playerBody;
+    ctx.fillRect(-11, -7, 4, 9);
+    ctx.fillStyle = COL.playerSkin;
+    ctx.fillRect(-11, 1, 4, 4);
+
+    // Right arm + gun
+    ctx.fillStyle = COL.playerBody;
+    ctx.fillRect(7, -7, 4, 7);
+
+    // Gun body
+    ctx.fillStyle = '#667788';
+    ctx.fillRect(7, -9, 5, 12);
+
+    // Gun barrel
+    ctx.fillStyle = '#889999';
+    ctx.fillRect(9, -24, 3, 18);
+
+    // Muzzle
+    ctx.fillStyle = '#aabbbb';
+    ctx.fillRect(8, -26, 5, 4);
+
+    // Muzzle flash
+    if (mouse.down && this.shootCd > this.shootRate - 3) {
+      ctx.fillStyle = '#ffff88';
+      ctx.globalAlpha = 0.9;
+      ctx.fillRect(7, -34, 7, 10);
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+
+    // Hit flash ring
+    if (this.flashT > 0) {
+      ctx.strokeStyle = COL.red;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = this.flashT / 18;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, 26 + (18 - this.flashT) * 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+}
+
+// ── Wave configs ──────────────────────────────────────────────────
+const WAVES = [
+  [{ t: 'grunt', n: 8 }],
+  [{ t: 'grunt', n: 9 }, { t: 'flanker', n: 3 }],
+  [{ t: 'grunt', n: 8 }, { t: 'flanker', n: 4 }, { t: 'sniper', n: 2 }],
+  [{ t: 'grunt', n: 6 }, { t: 'flanker', n: 6 }, { t: 'sniper', n: 3 }, { t: 'rusher', n: 4 }],
+  [{ t: 'grunt', n: 10 }, { t: 'flanker', n: 7 }, { t: 'sniper', n: 5 }, { t: 'rusher', n: 6 }],
+];
+
+// ── Game ──────────────────────────────────────────────────────────
+class Game {
+  constructor() { this.state = STATE.MENU; this._init(); }
+
+  _init() {
+    this.player = new Player();
+    this.playerBullets = []; this.enemyBullets = []; this.enemies = []; this.particles = [];
+    this.score = 0; this.level = 1;
+    this.queue = []; this.spawnT = 0;
+    this.clearTimer = 0; this.frame = 0;
+    this.introTimer = 0;
+    this.waveKills = 0; this.waveStartTime = 0;
+    this.starField = Array.from({ length: 40 }, () => ({
+      x: rnd(0, W), y: rnd(0, H), r: rnd(0.5, 2), b: rnd(0.2, 0.7)
+    }));
+  }
+
+  start() { this._init(); this.state = STATE.PLAYING; this._loadWave(1); }
+
+  _loadWave(lvl) {
+    this.level = lvl;
+    this.enemies = []; this.queue = [];
+    this.waveKills = 0;
+    this.waveStartTime = this.frame;
+    this.introTimer = 90;
+    for (const g of WAVES[lvl - 1])
+      for (let i = 0; i < g.n; i++) this.queue.push(g.t);
+    for (let i = this.queue.length - 1; i > 0; i--) {
+      const j = rndInt(0, i);
+      [this.queue[i], this.queue[j]] = [this.queue[j], this.queue[i]];
+    }
+    this.spawnT = 60;
+  }
+
+  _spawnEnemy(type) {
+    let x, y;
+    switch (rndInt(0, 3)) {
+      case 0: x = rnd(0, W);  y = -24; break;
+      case 1: x = W + 24;     y = rnd(0, H); break;
+      case 2: x = rnd(0, W);  y = H + 24; break;
+      default: x = -24;       y = rnd(0, H);
+    }
+    this.enemies.push(new Enemy(type, x, y, this.level));
+  }
+
+  update() {
+    if (this.state !== STATE.PLAYING && this.state !== STATE.LEVEL_CLEAR && this.state !== STATE.PAUSED) return;
+    this.frame++;
+
+    if (this.state === STATE.PAUSED) return;
+
+    if (this.state === STATE.PLAYING) {
+      this.player.update();
+
+      if (--this.spawnT <= 0 && this.queue.length > 0) {
+        this._spawnEnemy(this.queue.pop());
+        this.spawnT = 45;
+      }
+
+      for (const e of this.enemies) e.update(this.player);
+      for (const b of this.playerBullets) b.update();
+      for (const b of this.enemyBullets) b.update();
+
+      // Player bullet vs enemy
+      for (const b of this.playerBullets) {
+        if (!b.life) continue;
+        for (const e of this.enemies) {
+          if (!e.life) continue;
+          if (dst(b, e) < e.size + 2) {
+            e.hp--; b.life = 0;
+            this.waveKills++;
+            for (let i = 0; i < 7; i++) this.particles.push(new Particle(e.x, e.y, e.color, false));
+            if (e.hp <= 0) {
+              e.life = 0; this.score += e.score;
+              for (let i = 0; i < 18; i++) this.particles.push(new Particle(e.x, e.y, e.color, true));
+            }
+          }
+        }
+      }
+
+      // Enemy bullet vs player
+      for (const b of this.enemyBullets) {
+        if (!b.life) continue;
+        if (dst(b, this.player) < 15) {
+          this.player.hit();
+          b.life = 0;
+        }
+      }
+
+      // Player vs enemy (contact damage)
+      for (const e of this.enemies) {
+        if (e.life && dst(this.player, e) < e.size + 13) this.player.hit();
+      }
+
+      this.playerBullets = this.playerBullets.filter(b => b.life > 0);
+      this.enemyBullets = this.enemyBullets.filter(b => b.life > 0);
+      this.enemies = this.enemies.filter(e => e.life > 0);
+
+      if (this.player.hp <= 0) {
+        this.state = STATE.GAME_OVER;
+        for (let i = 0; i < 30; i++) this.particles.push(new Particle(this.player.x, this.player.y, COL.player, true));
+        return;
+      }
+
+      if (this.queue.length === 0 && this.enemies.length === 0) {
+        if (this.level >= WAVES.length) { this.state = STATE.VICTORY; }
+        else { this.state = STATE.LEVEL_CLEAR; this.clearTimer = 160; }
+      }
+    }
+
+    if (this.state === STATE.LEVEL_CLEAR) {
+      if (--this.clearTimer <= 0) { this.state = STATE.PLAYING; this._loadWave(this.level + 1); }
+    }
+
+    for (const p of this.particles) p.update();
+    this.particles = this.particles.filter(p => p.life > 0);
+  }
+
+  _drawGrid() {
+    ctx.strokeStyle = COL.grid; ctx.lineWidth = 1;
+    for (let x = 0; x <= W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+    for (let y = 0; y <= H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+  }
+
+  _drawStars() {
+    for (const s of this.starField) {
+      ctx.globalAlpha = s.b * (0.7 + 0.3 * Math.sin(this.frame * 0.02 + s.x));
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(s.x, s.y, s.r, s.r);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  _drawHUD() {
+    ctx.fillStyle = 'rgba(0,0,0,0.08)';
+    for (let y = 0; y < H; y += 4) ctx.fillRect(0, y, W, 2);
+
+    ctx.font = 'bold 18px monospace';
+    ctx.fillStyle = COL.ui;
+
+    ctx.textAlign = 'left';
+    ctx.fillText('SCORE', 16, 26);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(String(this.score).padStart(6, '0'), 80, 26);
+
+    ctx.fillStyle = COL.ui;
+    ctx.textAlign = 'right';
+    ctx.fillText(`LEVEL  ${this.level} / ${WAVES.length}`, W - 16, 26);
+
+    for (let i = 0; i < this.player.maxHp; i++) {
+      ctx.font = '22px serif';
+      ctx.fillStyle = i < this.player.hp ? '#ff2244' : '#330011';
+      ctx.textAlign = 'left';
+      ctx.fillText('♥', 14 + i * 30, 56);
+    }
+
+    const remaining = this.enemies.length + this.queue.length;
+    ctx.font = '13px monospace';
+    ctx.fillStyle = COL.uiDim;
+    ctx.textAlign = 'center';
+    ctx.fillText(`ENEMIES  ${remaining}`, W / 2, 22);
+
+    const total = WAVES[this.level - 1].reduce((s, g) => s + g.n, 0);
+    const done = total - remaining;
+    const bw = 160, bh = 6, bx = W / 2 - bw / 2, by = 28;
+    ctx.fillStyle = '#111';
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = COL.ui;
+    ctx.fillRect(bx, by, bw * (done / total), bh);
+    ctx.strokeStyle = COL.uiDim;
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    const mx = mouse.x, my = mouse.y;
+    ctx.strokeStyle = 'rgba(255,255,255,0.75)';
+    ctx.lineWidth = 1.5;
+    [[mx-12,my,mx-4,my],[mx+4,my,mx+12,my],[mx,my-12,mx,my-4],[mx,my+4,mx,my+12]].forEach(([x1,y1,x2,y2]) => {
+      ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+    });
+    ctx.strokeStyle = 'rgba(0,255,200,0.4)';
+    ctx.beginPath(); ctx.arc(mx, my, 7, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  _overlay(alpha) {
+    ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  _bigText(text, y, color, size) {
+    ctx.textAlign = 'center';
+    ctx.shadowColor = color; ctx.shadowBlur = 18;
+    ctx.fillStyle = color;
+    ctx.font = `bold ${size}px monospace`;
+    ctx.fillText(text, W / 2, y);
+    ctx.shadowBlur = 0;
+  }
+
+  _drawMenu() {
+    this._drawStars();
+    this._overlay(0.5);
+
+    this._bigText('TOP-DOWN', H / 2 - 110, COL.ui, 52);
+    this._bigText('SHOOTER', H / 2 - 55, COL.player, 52);
+
+    if (Math.floor(this.frame / 35) % 2 === 0) {
+      ctx.fillStyle = COL.yellow;
+      ctx.font = 'bold 20px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('CLICK OR PRESS ANY KEY TO START', W / 2, H / 2 + 10);
+    }
+
+    ctx.fillStyle = '#aaaaaa';
+    ctx.font = '15px monospace';
+    ctx.textAlign = 'center';
+    const ctrls = ['ARROW KEYS — Move', 'MOUSE — Aim', 'LEFT CLICK — Shoot', 'P — Pause', 'R — Restart'];
+    ctrls.forEach((l, i) => ctx.fillText(l, W / 2, H / 2 + 55 + i * 24));
+
+    ctx.font = '13px monospace';
+    const legend = [
+      { color: COL.grunt,   label: '■  GRUNT    +10' },
+      { color: COL.flanker, label: '■  FLANKER  +20' },
+      { color: COL.rusher,  label: '■  RUSHER   +30' },
+      { color: COL.sniper,  label: '■  SNIPER   +40' },
+    ];
+    legend.forEach((e, i) => {
+      ctx.fillStyle = e.color;
+      const startX = W / 2 - 180;
+      ctx.fillText(e.label, startX + (i % 2) * 180, H / 2 + 175 + Math.floor(i / 2) * 24);
+    });
+  }
+
+  _drawLevelClear() {
+    this._overlay(0.65);
+    const secs = Math.ceil(this.clearTimer / 60);
+    const waveTime = Math.floor((this.frame - this.waveStartTime) / 60);
+    this._bigText('WAVE CLEAR!', H / 2 - 80, COL.ui, 44);
+    ctx.fillStyle = '#aaaaaa';
+    ctx.font = '16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`Kills: ${this.waveKills}  Time: ${waveTime}s`, W / 2, H / 2 - 20);
+    this._bigText(`LEVEL ${this.level + 1} INCOMING`, H / 2 + 30, '#aaaaaa', 20);
+    this._bigText(String(secs), H / 2 + 100, COL.yellow, 64);
+  }
+
+  _drawGameOver() {
+    this._overlay(0.88);
+    this._bigText('GAME OVER', H / 2 - 70, COL.red, 58);
+    ctx.fillStyle = COL.ui; ctx.font = '24px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(`SCORE  ${this.score}`, W / 2, H / 2 + 10);
+    ctx.fillText(`REACHED LEVEL ${this.level}`, W / 2, H / 2 + 44);
+    if (Math.floor(this.frame / 35) % 2 === 0) {
+      ctx.fillStyle = COL.yellow; ctx.font = '17px monospace';
+      ctx.fillText('PRESS R  OR  CLICK TO RESTART', W / 2, H / 2 + 95);
+    }
+  }
+
+  _drawVictory() {
+    this._overlay(0.88);
+    this._bigText('YOU WIN!', H / 2 - 90, COL.yellow, 58);
+    ctx.fillStyle = COL.ui; ctx.font = '26px monospace'; ctx.textAlign = 'center';
+    ctx.fillText(`FINAL SCORE  ${this.score}`, W / 2, H / 2 - 10);
+    ctx.fillText('ALL 5 WAVES CLEARED!', W / 2, H / 2 + 32);
+    if (Math.floor(this.frame / 35) % 2 === 0) {
+      ctx.fillStyle = COL.yellow; ctx.font = '17px monospace';
+      ctx.fillText('PRESS R  OR  CLICK TO PLAY AGAIN', W / 2, H / 2 + 95);
+    }
+  }
+
+  _drawIntro() {
+    const alpha = Math.max(0, 1 - this.introTimer / 90);
+    const scale = 1 + alpha * 0.2;
+    ctx.globalAlpha = 1 - alpha;
+    ctx.save();
+    ctx.translate(W / 2, 60);
+    ctx.scale(scale, scale);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = COL.ui;
+    ctx.font = 'bold 48px monospace';
+    ctx.shadowColor = COL.ui;
+    ctx.shadowBlur = 20;
+    ctx.fillText(`WAVE ${this.level}`, 0, 0);
+    ctx.shadowBlur = 0;
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  _drawPaused() {
+    this._overlay(0.6);
+    this._bigText('PAUSED', H / 2 - 50, COL.ui, 48);
+    ctx.fillStyle = '#aaaaaa';
+    ctx.font = '16px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('Press P or ESC to Resume', W / 2, H / 2 + 30);
+    ctx.fillText('or click PAUSE button', W / 2, H / 2 + 60);
+  }
+
+  draw() {
+    ctx.fillStyle = COL.bg; ctx.fillRect(0, 0, W, H);
+
+    if (this.state === STATE.MENU) { this._drawGrid(); this._drawMenu(); return; }
+
+    this._drawGrid();
+    this._drawStars();
+
+    for (const p of this.particles) p.draw();
+    for (const b of this.playerBullets)   b.draw();
+    for (const b of this.enemyBullets)   b.draw();
+    for (const e of this.enemies)   e.draw();
+
+    if (this.state !== STATE.GAME_OVER) this.player.draw();
+
+    this._drawHUD();
+
+    if (this.introTimer > 0) this._drawIntro();
+    if (this.state === STATE.LEVEL_CLEAR) this._drawLevelClear();
+    if (this.state === STATE.GAME_OVER)   this._drawGameOver();
+    if (this.state === STATE.VICTORY)     this._drawVictory();
+    if (this.state === STATE.PAUSED)      this._drawPaused();
+  }
+
+  loop() { this.update(); this.draw(); requestAnimationFrame(() => this.loop()); }
+}
+
+const game = new Game();
+
+document.addEventListener('keydown', e => {
+  if (game.state === STATE.MENU && e.key !== 'F5' && e.key !== 'F12') game.start();
+});
+
+function resize() {
+  const scale = Math.min(window.innerWidth / W, window.innerHeight / H);
+  canvas.style.width  = (W * scale) + 'px';
+  canvas.style.height = (H * scale) + 'px';
+}
+window.addEventListener('resize', resize);
+resize();
+
+game.loop();
+</script>
+</body>
+</html>
